@@ -19,7 +19,7 @@ struct Cli {
 enum Command {
     /// Fetch hot posts from a subreddit
     Hot {
-        /// Subreddit name (without r/ prefix)
+        /// Subreddit name or URL (e.g. "rust" or "https://reddit.com/r/rust")
         subreddit: String,
 
         /// Number of posts (default: 10, max: 100)
@@ -64,7 +64,7 @@ enum Command {
     },
     /// Fetch a post and its comments
     Post {
-        /// Reddit post ID
+        /// Reddit post ID or URL (e.g. "1r8yi06" or "https://reddit.com/r/NixOS/comments/1r8yi06/...")
         post_id: String,
 
         /// Top-level comments (default: 20, max: 100)
@@ -97,7 +97,21 @@ enum Command {
     },
 }
 
-fn validate_subreddit(name: &str) -> Result<(), String> {
+/// Extract subreddit name from a URL or return the input as-is.
+/// Accepts: "rust", "r/rust", "https://www.reddit.com/r/rust/...", etc.
+fn parse_subreddit(input: &str) -> Result<String, String> {
+    let name = if input.contains('/') {
+        // Try to extract from URL or r/name path
+        input
+            .split('/')
+            .skip_while(|s| *s != "r")
+            .nth(1)
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("could not extract subreddit from: {input}"))?
+    } else {
+        input.to_string()
+    };
+
     if name.is_empty() || name.len() > 21 {
         return Err("subreddit name must be 1-21 characters".into());
     }
@@ -107,17 +121,31 @@ fn validate_subreddit(name: &str) -> Result<(), String> {
     {
         return Err("subreddit name must be alphanumeric or underscores".into());
     }
-    Ok(())
+    Ok(name)
 }
 
-fn validate_post_id(id: &str) -> Result<(), String> {
+/// Extract post ID from a URL or return the input as-is.
+/// Accepts: "1r8yi06", "https://www.reddit.com/r/NixOS/comments/1r8yi06/...", etc.
+fn parse_post_id(input: &str) -> Result<String, String> {
+    let id = if input.contains('/') {
+        // Try to extract from URL: .../comments/<id>/...
+        input
+            .split('/')
+            .skip_while(|s| *s != "comments")
+            .nth(1)
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("could not extract post ID from: {input}"))?
+    } else {
+        input.to_string()
+    };
+
     if id.is_empty() || id.len() > 10 {
         return Err("post ID must be 1-10 characters".into());
     }
     if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
         return Err("post ID must be lowercase alphanumeric".into());
     }
-    Ok(())
+    Ok(id)
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -137,7 +165,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             minimal,
             titles_only,
         } => {
-            validate_subreddit(&subreddit)?;
+            let subreddit = parse_subreddit(&subreddit)?;
             let limit = limit.clamp(1, 100);
 
             let mut filter = FieldFilter::default();
@@ -195,7 +223,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             no_comments,
             minimal,
         } => {
-            validate_post_id(&post_id)?;
+            let post_id = parse_post_id(&post_id)?;
             let comment_limit = comment_limit.clamp(1, 100);
             let comment_depth = comment_depth.clamp(1, 10);
 
