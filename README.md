@@ -2,18 +2,42 @@
 
 Token-efficient Reddit CLI tool that fetches content anonymously and outputs compact XML. Designed for use with LLM tools where every token counts.
 
+Built to match the functionality of [mcp-reddit-anon](https://github.com/rohanp2051/mcp-reddit-anon) as a standalone CLI tool.
+
 ## Installation
 
-### Nix flake
+### Imperative
 
 ```sh
-nix profile install github:rohanp/reddit2xml
+# Install to your profile
+nix profile install github:rohanp2051/reddit2xml
+
+# Or run directly without installing
+nix run github:rohanp2051/reddit2xml -- hot rust -n 5
 ```
 
-Or run directly:
+### Declarative (pinned in your system or home-manager flake)
 
-```sh
-nix run github:rohanp/reddit2xml -- hot rust -n 5
+Add reddit2xml as a flake input:
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    reddit2xml.url = "github:rohanp2051/reddit2xml";
+  };
+}
+```
+
+Then include the package:
+
+```nix
+# NixOS (configuration.nix)
+environment.systemPackages = [ inputs.reddit2xml.packages.${system}.default ];
+
+# Or home-manager (home.nix)
+home.packages = [ inputs.reddit2xml.packages.${system}.default ];
 ```
 
 ### Cargo
@@ -24,11 +48,17 @@ cargo install --path .
 
 ## Usage
 
+### Global options
+
+- `-o, --output <FILE>` — Write output to a file instead of stdout
+
 ### Fetch hot posts
 
 ```sh
 reddit2xml hot <SUBREDDIT> [OPTIONS]
 ```
+
+Accepts a subreddit name or full URL (e.g. `rust` or `https://reddit.com/r/rust`).
 
 **Options:**
 - `-n, --limit <N>` — Number of posts (default: 10, max: 100)
@@ -58,10 +88,14 @@ reddit2xml hot rust --titles-only
 ### Fetch a post with comments
 
 ```sh
-reddit2xml post <POST_ID> [OPTIONS]
+reddit2xml post <POST_ID_OR_URL> [OPTIONS]
 ```
 
+Accepts a post ID or full URL. Comment URLs are auto-detected — the comment ID and `?context=N` are extracted automatically.
+
 **Options:**
+- `--comment <ID>` — Focus on a specific comment thread (auto-detected from URLs)
+- `--context <N>` — Parent comments to include above a focused comment (auto-detected from `?context=N`)
 - `-c, --comment-limit <N>` — Top-level comments (default: 20, max: 100)
 - `-d, --comment-depth <N>` — Reply depth (default: 3, max: 10)
 - `--no-score` — Omit scores
@@ -78,6 +112,12 @@ reddit2xml post 1abc2de -c 5 -d 2
 
 # Post content only, no comments
 reddit2xml post 1abc2de --no-comments
+
+# Fetch a specific comment thread from a URL
+reddit2xml post 'https://www.reddit.com/r/NixOS/comments/1ptxbny/comment/nvk950t/'
+
+# Save output to a file
+reddit2xml -o post.xml post 1abc2de
 ```
 
 ## XML Output
