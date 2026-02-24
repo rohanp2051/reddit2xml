@@ -4,6 +4,7 @@ mod format;
 mod types;
 
 use clap::{Parser, Subcommand};
+use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::process;
 use types::FieldFilter;
@@ -11,6 +12,10 @@ use types::FieldFilter;
 #[derive(Parser)]
 #[command(name = "reddit2xml", about = "Token-efficient Reddit CLI outputting compact XML")]
 struct Cli {
+    /// Output file (default: stdout)
+    #[arg(short, long, global = true)]
+    output: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -64,8 +69,16 @@ enum Command {
     },
     /// Fetch a post and its comments
     Post {
-        /// Reddit post ID or URL (e.g. "1r8yi06" or "https://reddit.com/r/NixOS/comments/1r8yi06/...")
+        /// Reddit post ID or URL (e.g. "1r8yi06" or "https://reddit.com/r/science/comments/6nz1k/comment/c53u1w9/?context=3")
         post_id: String,
+
+        /// Focus on a specific comment thread (auto-detected from comment URLs)
+        #[arg(long)]
+        comment: Option<String>,
+
+        /// Number of parent comments to include above a focused comment (auto-detected from ?context=N)
+        #[arg(long)]
+        context: Option<u32>,
 
         /// Top-level comments (default: 20, max: 100)
         #[arg(short = 'c', long = "comment-limit", default_value_t = 20)]
@@ -124,28 +137,83 @@ fn parse_subreddit(input: &str) -> Result<String, String> {
     Ok(name)
 }
 
-/// Extract post ID from a URL or return the input as-is.
-/// Accepts: "1r8yi06", "https://www.reddit.com/r/NixOS/comments/1r8yi06/...", etc.
-fn parse_post_id(input: &str) -> Result<String, String> {
-    let id = if input.contains('/') {
-        // Try to extract from URL: .../comments/<id>/...
-        input
-            .split('/')
-            .skip_while(|s| *s != "comments")
-            .nth(1)
-            .map(|s| s.to_string())
-            .ok_or_else(|| format!("could not extract post ID from: {input}"))?
-    } else {
-        input.to_string()
-    };
+/// Parsed post URL components.
+struct PostRef {
+    post_id: String,
+    comment_id: Option<String>,
+    context: Option<u32>,
+}
 
+/// Extract post ID (and optionally comment ID + context) from a URL or bare ID.
+/// Accepts: "1r8yi06", "https://www.reddit.com/r/science/comments/6nz1k/comment/c53u1w9/?context=3", etc.
+fn parse_post_ref(input: &str) -> Result<PostRef, String> {
+    if !input.contains('/') {
+        validate_id(&input.to_string(), "post ID")?;
+        return Ok(PostRef {
+            post_id: input.to_string(),
+            comment_id: None,
+            context: None,
+        });
+    }
+
+    // Strip query string, parse it separately
+    let (path, query) = input.split_once('?').unwrap_or((input, ""));
+    let context = query
+        .split('&')
+        .find_map(|p| p.strip_prefix("context="))
+        .and_then(|v| v.parse::<u32>().ok());
+
+    let segments: Vec<&str> = path.split('/').collect();
+
+    // Find post ID: segment after "comments"
+    let comments_pos = segments
+        .iter()
+        .position(|s| *s == "comments")
+        .ok_or_else(|| format!("could not extract post ID from: {input}"))?;
+    let post_id = segments
+        .get(comments_pos + 1)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("could not extract post ID from: {input}"))?;
+
+    // Find comment ID: segment after "comment" (singular)
+    let comment_id = segments
+        .iter()
+        .position(|s| *s == "comment")
+        .and_then(|pos| segments.get(pos + 1))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    validate_id(&post_id, "post ID")?;
+    if let Some(ref cid) = comment_id {
+        validate_id(cid, "comment ID")?;
+    }
+
+    Ok(PostRef {
+        post_id,
+        comment_id,
+        context,
+    })
+}
+
+fn validate_id(id: &str, label: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > 10 {
-        return Err("post ID must be 1-10 characters".into());
+        return Err(format!("{label} must be 1-10 characters"));
     }
-    if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
-        return Err("post ID must be lowercase alphanumeric".into());
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err(format!("{label} must be lowercase alphanumeric"));
     }
-    Ok(id)
+    Ok(())
+}
+
+fn open_writer(path: &Option<String>) -> Result<BufWriter<Box<dyn Write>>, io::Error> {
+    match path {
+        Some(p) => Ok(BufWriter::new(Box::new(File::create(p)?))),
+        None => Ok(BufWriter::new(Box::new(io::stdout().lock()))),
+    }
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -208,13 +276,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let token = auth::get_access_token()?;
             let posts = api::fetch_hot(&subreddit, limit, &token)?;
 
-            let stdout = io::stdout();
-            let mut w = BufWriter::new(stdout.lock());
+            let mut w = open_writer(&cli.output)?;
             format::write_hot_xml(&mut w, &subreddit, &posts, &filter)?;
             w.flush()?;
         }
         Command::Post {
             post_id,
+            comment,
+            context,
             comment_limit,
             comment_depth,
             no_score,
@@ -223,9 +292,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             no_comments,
             minimal,
         } => {
-            let post_id = parse_post_id(&post_id)?;
+            let post_ref = parse_post_ref(&post_id)?;
             let comment_limit = comment_limit.clamp(1, 100);
             let comment_depth = comment_depth.clamp(1, 10);
+
+            // Explicit flags override URL-extracted values
+            let focus_comment = comment.or(post_ref.comment_id);
+            let focus_context = context.or(post_ref.context);
 
             let mut filter = FieldFilter::default();
             if minimal {
@@ -247,10 +320,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let token = auth::get_access_token()?;
-            let (post, comments) = api::fetch_post(&post_id, comment_limit, comment_depth, &token)?;
+            let (post, comments) = api::fetch_post(
+                &post_ref.post_id,
+                focus_comment.as_deref(),
+                focus_context,
+                comment_limit,
+                comment_depth,
+                &token,
+            )?;
 
-            let stdout = io::stdout();
-            let mut w = BufWriter::new(stdout.lock());
+            let mut w = open_writer(&cli.output)?;
             format::write_post_xml(&mut w, &post, &comments, &filter)?;
             w.flush()?;
         }

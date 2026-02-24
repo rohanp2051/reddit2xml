@@ -122,13 +122,21 @@ fn parse_comment(data: &Value) -> Comment {
 
 pub fn fetch_post(
     post_id: &str,
+    comment_id: Option<&str>,
+    context: Option<u32>,
     comment_limit: u32,
     comment_depth: u32,
     token: &str,
 ) -> Result<(Post, Vec<Comment>), io::Error> {
-    let endpoint = format!(
+    let mut endpoint = format!(
         "/comments/{post_id}?limit={comment_limit}&depth={comment_depth}&sort=top"
     );
+    if let Some(cid) = comment_id {
+        endpoint.push_str(&format!("&comment={cid}"));
+    }
+    if let Some(ctx) = context {
+        endpoint.push_str(&format!("&context={ctx}"));
+    }
     let json = fetch_json(&endpoint, token)?;
 
     let arr = json
